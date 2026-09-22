@@ -208,6 +208,7 @@ AI Infra 不是从零开始学的领域——它建立在编程能力、数学�
 第零层已经介绍了标准 Transformer 的结构，这里关注的是那些直接影响分布式切分策略和通信开销的架构变种：
 
 - Attention 变种：MHA → MQA → GQA → MLA 的演进。MQA/GQA 通过共享 KV Head 减少 KV Cache 大小，MLA（DeepSeek V2）用低秩压缩进一步降低 KV 显存——这些变种直接影响 TP 切分方式和推理显存规划
+- 稀疏注意力演进（长上下文时代的必考点）：NSA/MoBA 的可训练块级稀疏 → DSA（DeepSeek V3.2 的 Lightning Indexer + top-k 稀疏）→ DeepSeek V4 的 CSA/HCA 混合注意力（序列维压缩 + 稀疏选择，支撑 1M 上下文）。面试常考三者区别与"V3.2/V4 相较前代的创新点"
 - FFN 变种：混合专家模型 MoE（DeepSeekMoE）。MoE 的稀疏激活特性让并行策略从"切矩阵"变成"分专家"，引入 Expert Parallelism 这一新维度
 
 **优化器**
@@ -253,6 +254,9 @@ AI Infra 不是从零开始学的领域——它建立在编程能力、数学�
 | 类型 | 资料 | 说明 |
 |------|------|------|
 | 论文 | DeepSeek V2 技术报告 | MLA 注意力机制 |
+| 论文 | Native Sparse Attention Paper | 可训练三分支稀疏注意力 |
+| 论文 | DeepSeek V3.2-Exp 技术报告 | DSA 稀疏注意力与两阶段训练 |
+| 论文 | DeepSeek V4 技术报告 | CSA/HCA 混合注意力、mHC、Muon |
 | 论文 | DeepSeekMoE Paper | MoE 架构设计 |
 | 教程 | 混合专家模型 (MoE) 详解 | MoE 入门 |
 | 解读 | 苏剑林：从MHA、MQA、GQA到MLA | Attention 变种演进 |
@@ -385,8 +389,10 @@ AI Infra 不是从零开始学的领域——它建立在编程能力、数学�
 
 - Speculative Sampling：经典框架——用小模型（Draft）批量"猜测"多个 token，大模型（Target）一次性验证，保证分布无偏。好比让实习生先快速起草一段文字，再让资深主编一次性审阅：猜对的直接用，猜错的当场改，比主编逐字逐句从头写快得多
 - Medusa：不用外部 Draft 模型，通过多个 Decoding Heads 预测多 token 再并行验证
-- EAGLE-2：动态 Draft Tree，靠校准置信度更激进地产生可接受 token
+- EAGLE-2/3：动态 Draft Tree，靠校准置信度更激进地产生可接受 token
 - Block Verification：将 token 级验证升级为 block 级联合验证，进一步提速
+- MTP（Multi-Token Prediction）：DeepSeek V3/V4 在预训练阶段内置的多 token 预测目标，推理时可直接复用为自投机草稿头（MTP-1 接受率 80%+，约 1.8x TPS），面试高频考点"MTP 是训练技术还是推理技术"
+- DSpark：DeepSeek 2026 年开源的生产级投机解码框架——半自回归草稿（并行主干 + 轻量顺序头）配合置信度调度验证，按引擎负载动态截断验证长度，生产环境较 MTP-1 再提速 60%+
 
 **推荐资料**
 
@@ -396,6 +402,8 @@ AI Infra 不是从零开始学的领域——它建立在编程能力、数学�
 | 论文 | Medusa Paper + Repo | 多头解码，免 Draft 模型 |
 | 论文 | EAGLE-2 Paper | 动态 Draft Tree |
 | 论文 | Block Verification Paper | Block 级联合验证 |
+| 论文 | DeepSeek-V3 技术报告（MTP 章节） | MTP 训练目标与推理复用 |
+| 论文 | DSpark Paper + DeepSpec Repo | 半自回归草稿 + 置信度调度验证 |
 | 代码 | vLLM / TensorRT-LLM 的 Speculative 支持 | 工程落地参考 |
 | 教程 | SGLang 结构化输出加速（cFSM） | 结构化生成场景加速 |
 
