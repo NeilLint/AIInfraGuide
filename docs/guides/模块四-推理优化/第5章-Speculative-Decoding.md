@@ -21,7 +21,7 @@ tags: ["Speculative Decoding", "投机解码", "Medusa", "EAGLE", "N-gram", "Rej
 
 **在 vLLM 中配置投机解码实战**：介绍 vLLM 对 N-gram、EAGLE、Draft 模型等投机解码方案的配置方式，并对比代码生成 vs 开放对话的 Acceptance Rate 差异。
 
-**MTP 与 DSpark**覆盖 DeepSeek 系的自投机路线：MTP（Multi-Token Prediction）如何在预训练阶段内置草稿能力（训练目标 + 推理复用的双重身份），以及 DeepSeek V4 时代的 DSpark——半自回归草稿（并行主干 + 轻量顺序头）配合置信度调度验证，在生产环境把单用户生成速度较 MTP-1 基线再提升 60% 以上。
+🆕 **MTP 与 DSpark**覆盖 DeepSeek 系的自投机路线：MTP（Multi-Token Prediction）如何在预训练阶段内置草稿能力（训练目标 + 推理复用的双重身份），以及 DeepSeek V4 时代的 DSpark——半自回归草稿（并行主干 + 轻量顺序头）配合置信度调度验证，在生产环境把单用户生成速度较 MTP-1 基线再提升 60% 以上。
 
 ## 本章小节
 
@@ -30,4 +30,4 @@ tags: ["Speculative Decoding", "投机解码", "Medusa", "EAGLE", "N-gram", "Rej
 - **5.3 Self-Draft 方案**：Medusa、EAGLE-2/3、Draft Tree
 - **5.4 收益边界与限制**：接受率、精度风险、调度复杂度
 - **5.5 vLLM 投机解码实战**：配置方式与接受率实测
-- **5.6 MTP 与 DSpark**：多 Token 预测的训练/推理双重身份、半自回归草稿与置信度调度验证
+- **5.6 MTP 与 DSpark** 🆕：多 Token 预测的训练/推理双重身份、半自回归草稿与置信度调度验证
