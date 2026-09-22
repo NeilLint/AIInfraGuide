@@ -89,6 +89,7 @@ AIInfraGuide 正是为了解决这些问题而创建的——一个**开源、�
 | 3.7 | [Transformer Decoder Block完整解析](https://caomaolufei.github.io/AIInfraGuide/prerequisites/模块一-前置知识/transformer/37-transformer-decoder-block完整解析) | 大语言模型的核心计算单元是 Transformer Decoder Block |
 | 3.8 | [从Transformer到LLM自回归生成深入理解](https://caomaolufei.github.io/AIInfraGuide/prerequisites/模块一-前置知识/transformer/38-从transformer到llm自回归生成深入理解/) | 从宏观视角理解 Transformer 到 LLM 自回归生成的计算流程 |
 | 3.9 | [Tokenization与词嵌入](https://caomaolufei.github.io/AIInfraGuide/prerequisites/模块一-前置知识/transformer/39-tokenization与词嵌入/) | 一段文字变成模型输入之前，需要先经过两道关键变换：Tokenization（分词） 和 Embedding（词嵌入） |
+| 3.10 | [🔥 现代注意力机制演进](https://caomaolufei.github.io/AIInfraGuide/prerequisites/模块一-前置知识/transformer/310-现代注意力机制演进/) | MLA 矩阵吸收与解耦 RoPE、NSA/MoBA/DSA 稀疏注意力、DeepSeek V4 的 CSA+HCA 混合注意力，当下面试最高频的注意力考点全景 |
 | 第4章 | [🔥 PyTorch框架入门](https://caomaolufei.github.io/AIInfraGuide/prerequisites/模块一-前置知识/pyroch/pytorch框架入门/) | PyTorch 是当前大模型训练和推理的事实标准框架 |
 | 第5章 | [🔥 GPU基础知识：从硬件架构到AI计算](https://caomaolufei.github.io/AIInfraGuide/prerequisites/模块一-前置知识/gpu/gpu-basics/) | CPU vs GPU、SM 架构、显存层级、Tensor Core |
 | 5.1 | [NVIDIA GPU 架构演进：从 Volta 到 Blackwell](https://caomaolufei.github.io/AIInfraGuide/prerequisites/模块一-前置知识/gpu/nvidia-gpu-evolution/) | V100 → A100 → H100 → B200 架构演进 |
@@ -140,7 +141,9 @@ AIInfraGuide 正是为了解决这些问题而创建的——一个**开源、�
 | 6.1 | [FlashAttention V1详解](https://caomaolufei.github.io/AIInfraGuide/cuda/模块二-cuda编程与算子优化/61-flashattention-v1详解) | 本文深入剖析 FlashAttention V1 的核心原理与实现细节，理解如何通过 Tiling + Online Softmax 将 Attention 的额外显存占用从 $O(N^2)$ 降至 $O(N)$，同时大幅减少 HBM 访问量，实现无精度损失的加速 |
 | 6.2 | [FlashAttention V2详解](https://caomaolufei.github.io/AIInfraGuide/cuda/模块二-cuda编程与算子优化/62-flashattention-v2详解) | 本文深入剖析 FlashAttention V2 相比 V1 的核心改进：调换内外循环顺序、优化线程块内的工作分配、减少非矩阵乘运算 |
 | 第 7 章| AI 编译器 | Triton、torch.compile、TVM/XLA 概述 |
+| 7.1 | [AI编译器详解](https://caomaolufei.github.io/AIInfraGuide/cuda/模块二-cuda编程与算子优化/71-ai编译器详解) | torch.compile 三级链路（Dynamo/AOTAutograd/Inductor）、Triton 编程模型与 fused softmax、算子融合类型、CUDA Graph |
 | 第 8 章| 性能分析工具链 | Nsight Systems/Compute、PyTorch Profiler |
+| 8.1 | [性能分析工具链详解](https://caomaolufei.github.io/AIInfraGuide/cuda/模块二-cuda编程与算子优化/81-性能分析工具链详解) | Roofline 推导、Nsight Systems/Compute 实操、PyTorch Profiler、CUDA Event 计时与常见性能问题手册 |
 
 
 <br>
@@ -177,6 +180,13 @@ AIInfraGuide 正是为了解决这些问题而创建的——一个**开源、�
 | 第 4 章| 数据并行 | DataParallel、DistributedDataParallel、FSDP |
 | 4.1 | [数据并行详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/41-数据并行详解/) | DP/DDP/FSDP 演进、梯度同步机制、通信量与显存账本的数学推导 |
 | 4.2 | [PyTorch 数据并行从原理到实战](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/42-pytorch-数据并行从原理到实战/) | 通信原语、DDP、FSDP 参数分片、多机多卡实战，附完整代码示例 |
+| 5.1 | [ZeRO系列详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/51-zero系列详解/) | 16Ψ 显存账本、ZeRO-1/2/3 切分与通信量推导、ZeRO++、Offload/Infinity、FSDP 对应关系与 DeepSpeed 配置 |
+| 6.1 | [张量并行与序列并行详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/61-张量并行与序列并行详解/) | Megatron 列/行并行与 f/g 算子对偶、通信量推导、序列并行激活显存优化、GQA/MLA 切分约束 |
+| 7.1 | [流水线并行详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/71-流水线并行详解/) | GPipe/1F1B/Interleaved 气泡率推导与时序图、Zero Bubble 与 DualPipe、并行排布原则 |
+| 8.1 | [混合精度与显存优化详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/81-混合精度与显存优化详解/) | FP16/BF16/FP8 格式对比、AMP 与 Loss Scaling、DeepSeek-V3 FP8 训练、梯度检查点与显存排查 |
+| 9.1 | [长序列训练与上下文并行详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/91-长序列训练与上下文并行详解/) | Ring Attention 环形流转、Zigzag 负载均衡、DeepSpeed Ulysses、Ring vs Ulysses 对比与 USP |
+| 10.1 | [MoE并行详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/101-moe并行详解/) | Router 与 All-to-All 通信量、辅助损失与 aux-loss-free 均衡、DeepEP 两级转发、推理大 EP 与冗余专家 |
+| 11.1 | [3D并行与混合并行策略详解](https://caomaolufei.github.io/AIInfraGuide/distributed/模块三-分布式训练/111-3d并行与混合并行策略详解/) | 五维并行代价总表、排布原则、64 卡训 70B 完整推演、DeepSeek-V3 并行配置案例、OOM 排查旋钮 |
 
 <br>
 
@@ -210,6 +220,16 @@ AIInfraGuide 正是为了解决这些问题而创建的——一个**开源、�
 | 2.4 | [Chunked Prefill 与统一调度](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第2章-推理引擎核心技术/24-chunked-prefill-与统一调度/) | 切块 Prefill 消除对 Decode 的干扰，vLLM V1 用统一 Token 预算调度器抹平 Prefill/Decode 边界 |
 | 2.5 | [Attention 后端与图优化](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第2章-推理引擎核心技术/25-attention-后端与图优化/) | 可插拔 Attention 后端与 CUDA Graph、torch.compile 消除 Decode 阶段的 CPU 启动开销 |
 | 3.0 | [vLLM 快速入门](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第3章-深入vllm/vllm快速入门/) | 从安装到部署你的第一个 LLM 推理服务，离线批量推理与在线 OpenAI 兼容服务 |
+| 3.2 | [vLLM架构与V1引擎详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第3章-深入vllm/32-vllm架构与v1引擎详解/) | 五层架构与请求数据流、V1 引擎五项重构、调度器与抢占机制、配置调优、vLLM/SGLang/TensorRT-LLM 选型 |
+| 4.1 | [量化核心技术详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第4章-量化/41-量化核心技术详解/) | 对称/非对称量化推导、SmoothQuant、GPTQ/AWQ/Marlin、KV Cache 量化、FP8/NVFP4 与 vLLM 实战 |
+| 5.1 | [投机解码核心原理详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第5章-speculative-decoding/51-投机解码核心原理详解/) | Rejection Sampling 无偏性完整证明、N-gram/Suffix、Medusa 树注意力、EAGLE-1/2/3、收益边界与 vLLM 实战 |
+| 5.6 | [🔥 MTP与DSpark](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第5章-speculative-decoding/56-mtp与dspark/) | DeepSeek MTP 的训练/推理双重身份、DSpark 半自回归草稿与置信度调度验证（生产提速 60%+） |
+| 6.1 | [分布式推理详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第6章-分布式推理/61-分布式推理详解/) | 推理 TP/PP/EP 与训练的差异、70B 四卡显存推演、Ray 多机部署、NVLink/PCIe/IB 带宽账 |
+| 7.1 | [PD解耦架构详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第7章-pd解耦架构/71-pd解耦架构详解/) | Prefill/Decode 资源画像冲突、DistServe/Splitwise 的 Goodput 视角、KV 传输通道、xPyD 配比与 Mooncake |
+| 8.1 | [生产级服务特性详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第8章-生产级服务特性/81-生产级服务特性详解/) | 结构化输出与受约束解码、Tool Calling/Reasoning Parser、Multi-LoRA、多模态推理、采样与解码算法 |
+| 9.1 | [性能分析与Benchmark详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第9章-性能分析与benchmark/91-性能分析与benchmark详解/) | TTFT/TPOT/Goodput 指标体系、压测方法论与常见陷阱、瓶颈定位决策表、vLLM metrics 观测 |
+| 10.1 | [生产部署与运维详解](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第10章-生产部署与运维/101-生产部署与运维详解/) | K8s 部署与探针、Prometheus 指标与告警、KEDA 扩缩容与前缀感知路由、容量规划推演 |
+| 11.1 | [推理优化选型与端到端实战](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第11章-推理优化选型与端到端实战/111-推理优化选型与端到端实战/) | 按症状选技术的决策树、优化组合冲突分析、7B/70B 端到端部署实战、核心 trade-off 汇总 |
 | 12.1 | [端侧推理基础：从模型导出到异构硬件执行](https://caomaolufei.github.io/AIInfraGuide/inference/模块四-推理优化/第12章-端侧推理/121-端侧推理基础/) | 端侧约束、软硬件栈、运行时选型、量化与内存优化、Benchmark，以及 ExecuTorch/XNNPACK 最小实例 |
 
 <br>
