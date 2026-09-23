@@ -759,15 +759,129 @@ KV Cache 将 QKV 投影的总计算量从 $O(N^2 \cdot d^2)$ 降到了 $O(N \cdo
 
 完成本文学习后，检验自己是否真正理解了 Transformer 架构：
 
-- 能不看资料，在白板上画出一个完整的 Decoder Block 结构图（Masked Self-Attention → Add & Norm → FFN → Add & Norm），标注每一步的输入输出维度
-- 能说清 Encoder-Decoder、Encoder-only、Decoder-only 三种架构变体的区别，以及为什么当前大模型普遍采用 Decoder-only
-- 能说清 Q、K、V 三个矩阵各自的含义，以及 Attention 分数矩阵 $(N, N)$ 中每个元素的物理意义
-- 能默写 Attention 完整公式 $\text{softmax}(QK^T / \sqrt{d_k}) \cdot V$，并解释为什么要除以 $\sqrt{d_k}$
-- 能推导 Self-Attention 的 $O(N^2)$ 复杂度，并解释这如何催生了 FlashAttention
-- 能解释 Multi-Head Attention 为什么适合张量并行切分，以及 GQA 相比 MHA 在 KV Cache 上的优势
-- 能手算 LLaMA-2-7B 的总参数量（误差不超过 20%），并说清 FFN 和 Attention 的参数比例
-- 能解释 Prefill 和 Decode 两阶段的计算特性差异（Compute Bound vs Memory Bound），以及 KV Cache 的由来
-- 能估算给定配置下 KV Cache 的显存占用（如 7B 模型、4096 序列长度、batch_size=16 下约 32 GB）
+**1. 能不看资料，在白板上画出一个完整的 Decoder Block 结构图（Masked Self-Attention → Add & Norm → FFN → Add & Norm），标注每一步的输入输出维度**
+
+<details>
+<summary>参考答案</summary>
+
+以 Pre-Norm Decoder-only 架构（LLaMA-2-7B 配置：$d_{model}=4096$、32 头、head_dim=128、$d_{ff}=11008$、$N=2048$）为例，数据流为：
+
+- 输入 $(2048, 4096)$ → **LayerNorm**（形状不变）
+- **Masked Self-Attention**：QKV 投影 $(2048, 4096) \times (4096, 4096)$，reshape 成 $(2048, 32, 128)$；对 Q、K 施加 RoPE；每头 $S_i = Q_i K_i^T / \sqrt{128}$ 得 $(2048, 2048)$，加因果掩码后 softmax，乘 $V_i$ 得 $(2048, 128)$；32 头拼接为 $(2048, 4096)$，过 $W_O$
+- **残差相加**：$h = \text{Input} + \text{Output}$，仍为 $(2048, 4096)$
+- **LayerNorm → FFN（SwiGLU）**：gate/up 升维到 $(2048, 11008)$，$\text{Swish(gate)} \odot \text{up}$ 后经 $W_{down}$ 降回 $(2048, 4096)$
+- **残差相加**，输出 $(2048, 4096)$
+
+关键性质：从头到尾数据形状始终保持 $(N, d_{model})$，因此多个 Block 可以像积木一样堆叠。（详见第 7.1–7.2 节）
+
+</details>
+
+**2. 能说清 Encoder-Decoder、Encoder-only、Decoder-only 三种架构变体的区别，以及为什么当前大模型普遍采用 Decoder-only**
+
+<details>
+<summary>参考答案</summary>
+
+- **Encoder-only**（BERT、RoBERTa）：双向注意力，每个 token 看所有 token，适合文本分类、NER、信息抽取
+- **Encoder-Decoder**（T5、BART、原始 Transformer）：Encoder 双向 + Decoder 因果 + Cross-Attention，适合翻译、摘要等 Seq2Seq 任务
+- **Decoder-only**（GPT、LLaMA、Mistral、Qwen）：只保留带因果掩码的 Self-Attention，每个 token 只看前面的 token，适合文本生成、对话
+
+Decoder-only 成为主流的两个核心原因：**统一的训练目标**——所有任务都可转化为"预测下一个 token"，不需要针对不同任务设计不同架构；**工程简洁性**——只有一种 Block 结构，推理时的 KV Cache 管理、并行策略都更简单直接。（详见第 2.2–2.3 节）
+
+</details>
+
+**3. 能说清 Q、K、V 三个矩阵各自的含义，以及 Attention 分数矩阵 $(N, N)$ 中每个元素的物理意义**
+
+<details>
+<summary>参考答案</summary>
+
+用检索类比：**Q（Query）**是"我想查什么"——当前词想要获取的信息；**K（Key）**是"索引/标题"——每个词用来被别人匹配的标识；**V（Value）**是"实际内容"——匹配成功后要传递的信息。在 Self-Attention 中每个 token 同时扮演三种角色（既是提问者，也是索引，还是信息提供者），Q、K、V 均由输入 $X$ 乘以可学习矩阵 $W_Q, W_K, W_V$ 得到。
+
+分数矩阵 $S = QK^\top$ 中，$S[i][j]$ 表示第 $i$ 个 token 对第 $j$ 个 token 的关注程度（原始分数）；对每行做 softmax 后，$A[i][j]$ 就是第 $i$ 个 token 分配给第 $j$ 个 token 的注意力权重，每行之和为 1。（详见第 3.1–3.2 节）
+
+</details>
+
+**4. 能默写 Attention 完整公式 $\text{softmax}(QK^T / \sqrt{d_k}) \cdot V$，并解释为什么要除以 $\sqrt{d_k}$**
+
+<details>
+<summary>参考答案</summary>
+
+完整公式：
+
+$$
+\text{Attention}(Q, K, V) = \text{softmax}\left(\frac{QK^T}{\sqrt{d_k}}\right) V
+$$
+
+除以 $\sqrt{d_k}$ 的原因：当维度 $d_k$ 很大时，Q 和 K 的内积是 $d_k$ 个分量相加，数值会变得很大，导致 softmax 的输入差异悬殊。softmax 对大数值非常敏感——输入差距一大，输出就会"极化"成接近 one-hot 的分布，梯度几乎为零，训练就卡住了。除以 $\sqrt{d_k}$ 能把方差拉回到 1 附近，让 softmax 工作在梯度健康的区间。（详见第 3.2 节）
+
+</details>
+
+**5. 能推导 Self-Attention 的 $O(N^2)$ 复杂度，并解释这如何催生了 FlashAttention**
+
+<details>
+<summary>参考答案</summary>
+
+- 关键一步 $QK^T$ 的形状为 $(N, d) \times (d, N) = (N, N)$：计算量 $O(N^2 \cdot d)$（$N^2$ 个元素、每个需 $d$ 次乘加），显存 $O(N^2)$（需存完整 $N \times N$ 注意力矩阵）
+- $A \cdot V$ 是 $(N, N) \times (N, d)$，计算量同为 $O(N^2 \cdot d)$，故总复杂度 $O(N^2 \cdot d)$，简写 $O(N^2)$
+- 序列长度从 2K 增到 128K 时，计算量和显存占用增长 $(128K/2K)^2 = 4096$ 倍，这就是长上下文困难的根源
+
+标准实现需把完整 $N \times N$ 矩阵写入 HBM，FlashAttention 通过 tiling（分块计算）+ online softmax 让注意力矩阵始终驻留片上 SRAM，将 HBM 访问量从 $O(N^2)$ 降到 $O(N)$——计算量没变，但显存访问大幅减少，是"Memory-aware"优化的核心思想。（详见第 3.3 节）
+
+</details>
+
+**6. 能解释 Multi-Head Attention 为什么适合张量并行切分，以及 GQA 相比 MHA 在 KV Cache 上的优势**
+
+<details>
+<summary>参考答案</summary>
+
+多头结构中各头的计算相互独立，天然适合张量并行：如 32 个头均匀分到 4 张 GPU、每卡处理 8 个头，每张卡只需 1/4 的 QKV 权重和计算量，切分后只需一次 AllReduce 通信汇总各卡结果——这就是 Megatron-LM 沿"头"维度切分 Attention 的核心思想。
+
+KV Cache 方面：MQA 让所有头共享一组 KV，GQA 让若干头共享一组 KV。KV 头数减少直接等比缩小 KV Cache 的大小（KV Cache 正比于 KV 头数），因此 GQA 相比 MHA 能大幅降低推理显存开销，同时保持接近 MHA 的效果，是推理优化中的核心概念。（详见第 3.4 节）
+
+</details>
+
+**7. 能手算 LLaMA-2-7B 的总参数量（误差不超过 20%），并说清 FFN 和 Attention 的参数比例**
+
+<details>
+<summary>参考答案</summary>
+
+配置：$d_{model}=4096$、32 头、$d_{ff}=11008$、32 层、vocab_size=32000。
+
+- 单 Block：Attention 四个矩阵 $W_Q/W_K/W_V/W_O$ 各 $4096^2 \approx 16.8M$，合计约 67M；FFN 三个矩阵 $W_{gate}/W_{up}/W_{down}$ 各 $4096 \times 11008 \approx 45M$，合计约 135M；加 LayerNorm，共约 **201M**
+- 全模型：Token Embedding $32000 \times 4096 \approx 131M$ + 32 层 Block $\approx 6432M$ + LM Head $\approx 131M$ ≈ **6.7B**（weight tying 时约 6.6B，官方取整称 7B）
+
+参数比例：**FFN 约占 2/3（67%）**、Attention 约占 1/3（33%），Embedding 只占约 2%。这个手算能力是显存规划的基础——按混合精度 + Adam（16 Bytes/param）训练 7B 需约 107 GB 静态显存，单张 80GB A100 训不动。（详见第 7.3 节）
+
+</details>
+
+**8. 能解释 Prefill 和 Decode 两阶段的计算特性差异（Compute Bound vs Memory Bound），以及 KV Cache 的由来**
+
+<details>
+<summary>参考答案</summary>
+
+- **Prefill**：并行处理整个 prompt，所有输入 token 一次前向传播完成，矩阵运算的 batch 维度大，是典型的 **Compute Bound**（算力瓶颈），耗时决定 TTFT（首 token 延迟）
+- **Decode**：逐个生成 token，每步只有 1 个新 token 的 Q 与所有历史 K 做 Attention，矩阵乘退化为矩阵-向量乘，GPU 算力远远用不满，大部分时间在从 HBM 搬运 KV Cache，是典型的 **Memory Bound**（带宽瓶颈），耗时决定 TPOT（每 token 延迟）
+- 两阶段瓶颈截然不同，催生了 Prefill/Decode 解耦架构（DistServe、Splitwise）
+
+**KV Cache 的由来**：不缓存时，每生成一个新 token 都要对所有历史 token 重新做 QKV 投影，纯属浪费——总计算量 $O(N^2 \cdot d^2)$；缓存每层每步的 K、V 后，每步只算新 token 的 QKV，总计算量降到 $O(N \cdot d^2 + N^2 \cdot d)$，代价是额外显存。（详见第 8.2–8.3 节）
+
+</details>
+
+**9. 能估算给定配置下 KV Cache 的显存占用（如 7B 模型、4096 序列长度、batch_size=16 下约 32 GB）**
+
+<details>
+<summary>参考答案</summary>
+
+估算公式：每 token 缓存元素数 = 2（K 和 V）× 层数 × KV 头数 × head_dim，再乘以每元素字节数、序列长度和 batch_size。
+
+以 LLaMA-2-7B 为例：
+
+- 每 token：$2 \times 32 \times 32 \times 128 = 262{,}144$ 个元素，FP16（2 Bytes）下 = **512 KB**
+- 序列长度 4096 → 单请求 $4096 \times 512\text{KB}$ = **2 GB**
+- batch_size = 16 → 总 KV Cache $16 \times 2\text{GB}$ = **32 GB**
+
+32 GB 在 80 GB 显存中占了 40%，加上模型参数 13.4 GB，剩余空间非常有限——这就是 PagedAttention、KV Cache 量化、GQA 等技术要解决的"显存刺客"问题。（详见第 8.3 节）
+
+</details>
 
 ## 📚 参考资料
 

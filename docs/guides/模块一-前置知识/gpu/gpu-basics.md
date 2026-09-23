@@ -469,16 +469,117 @@ nvidia-smi nvlink -s
 
 ## 🎯 自我检验清单
 
-- 能说出 CPU 和 GPU 在架构设计哲学上的核心区别
-- 能画出 GPU 的层级结构（GPC → SM → CUDA Core / Tensor Core）
-- 能解释 Warp 的概念以及 Warp Divergence 为什么影响性能
-- 能说出 GPU 存储层级（Register → Shared Memory → L2 → HBM）各自的容量和速度量级
-- 能用 Roofline 模型判断一个算子是 Compute-bound 还是 Memory-bound
-- 能解释 BF16 和 FP16 的区别，以及为什么大模型训练更推荐 BF16
-- 能列举 3 种以上显存优化策略及其原理
-- 能用 `nvidia-smi` 查看 GPU 状态、拓扑信息
-- 能说出 NVLink 和 PCIe 在带宽上的数量级差异
-- 能估算一个 7B 参数模型使用 Adam + FP16 混合精度训练时的显存占用
+**1. 能说出 CPU 和 GPU 在架构设计哲学上的核心区别**
+
+<details>
+<summary>参考答案</summary>
+
+- CPU 是延迟导向：几个到几十个“大核”，单核能力强（复杂分支预测、乱序执行），缓存占芯片面积的大部分，擅长串行逻辑和复杂任务。
+- GPU 是吞吐导向：数千到上万个“小核”，大量核心共享简单控制单元，缓存占比小，配合 HBM 极高带宽（~3 TB/s，远超 DDR5 的 ~100 GB/s），擅长大量简单任务的并行处理。
+- 深度学习的核心是矩阵乘法和逐元素运算：数据并行度极高、计算模式规则（不需要复杂分支），恰好是 GPU 的长项；H100 的 FP16 算力约 989 TFLOPS，比高端服务器 CPU 高两个数量级以上。（详见第 1 节）
+
+</details>
+
+**2. 能画出 GPU 的层级结构（GPC → SM → CUDA Core / Tensor Core）**
+
+<details>
+<summary>参考答案</summary>
+
+- GPU 芯片 → GPC（Graphics Processing Cluster，“事业部”）→ TPC（“部门”）→ SM（Streaming Multiprocessor，“小组”，GPU 的基本调度单元）。
+- SM 内部包含：CUDA Core（执行 FP32/INT32 运算）、Tensor Core（执行矩阵乘累加）、SFU（sin/cos/exp 等超越函数）、Warp Scheduler、Register File 和 Shared Memory / L1 Cache。以 H100 为例，每个 SM 有 128 个 CUDA Core、4 个第四代 Tensor Core、256 KB 寄存器堆、228 KB 可配置的 Shared Memory/L1。
+- SM 之外还有全局共享的 L2 Cache 和 Memory Controller 连接 HBM；SM 是资源分配的最小粒度，一个 Thread Block 会被调度到一个 SM 上执行。（详见第 2.1、2.2 节）
+
+</details>
+
+**3. 能解释 Warp 的概念以及 Warp Divergence 为什么影响性能**
+
+<details>
+<summary>参考答案</summary>
+
+- GPU 不是一个线程一个线程执行，而是以 Warp（线程束）为单位：32 个线程锁步执行同一条指令、处理不同数据，这种模式叫 SIMT（Single Instruction, Multiple Threads）。
+- 如果 Warp 内的线程遇到分支（if-else），走不同分支的线程会被掩码（mask）而空转，两个分支实际上被串行执行——这就是 Warp Divergence，是 GPU 编程中需要极力避免的性能杀手。（详见第 2.3 节）
+
+</details>
+
+**4. 能说出 GPU 存储层级（Register → Shared Memory → L2 → HBM）各自的容量和速度量级**
+
+<details>
+<summary>参考答案</summary>
+
+- Register：每线程约 255 个，~0 cycle，单线程私有，最快但容量极有限。
+- Shared Memory：每 SM 约 228 KB，~30 cycle，SM 内所有线程共享，是程序员显式管理的“L1 级别”缓存（L1 Cache 与其共享容量、由硬件管理）。
+- L2 Cache：整卡约 50 MB，~200 cycle，所有 SM 共享。
+- HBM（显存）：80 GB 量级，~600 cycle，带宽决定吞吐上限。越靠近计算核心速度越快、容量越小。（详见第 3.1 节）
+
+</details>
+
+**5. 能用 Roofline 模型判断一个算子是 Compute-bound 还是 Memory-bound**
+
+<details>
+<summary>参考答案</summary>
+
+- 算术强度 = 浮点运算量（FLOPs）/ 内存访问量（Bytes）。当算术强度低于 GPU 的 ops:byte 比（算力 / 带宽）时任务是 Memory-bound，反之是 Compute-bound。
+- 以 H100 SXM 为例：FP16 算力 989 TFLOPS、HBM3 带宽 3,350 GB/s，ops:byte 比约 295 FLOPs/Byte——每从显存读 1 Byte 至少要执行 295 次 FP16 运算才能跑满算力。
+- 大多数深度学习算子（Attention、LayerNorm、激活函数等）的算术强度远低于 295，因此 FlashAttention、Kernel Fusion 等优化的核心思路就是减少显存访问、提升算术强度。（详见第 3.3 节）
+
+</details>
+
+**6. 能解释 BF16 和 FP16 的区别，以及为什么大模型训练更推荐 BF16**
+
+<details>
+<summary>参考答案</summary>
+
+- 两者都是 16 位，但 BF16 保留了和 FP32 相同的 8 位指数位，动态范围更大；FP16 指数位少、范围较窄，训练时容易溢出，需要 loss scaling。
+- BF16 训练不需要 loss scaling，且显存占用与 FP16 一样减半，因此现代大模型训练几乎都用 BF16 而非 FP16。
+- 硬件支持上，FP16 从 Volta（V100）开始被 Tensor Core 支持，BF16 从 Ampere（A100）开始支持。（详见第 4.2 节）
+
+</details>
+
+**7. 能列举 3 种以上显存优化策略及其原理**
+
+<details>
+<summary>参考答案</summary>
+
+- 混合精度训练：用 FP16/BF16 做前向反向、FP32 做参数更新，省约 50% 参数显存，FP16 需要 loss scaling。
+- 梯度累积：用多个 micro-batch 累积梯度等效大 batch，减少激活值峰值，代价是增加训练步数。
+- 梯度检查点：前向只保留部分激活，反向时重新计算，激活显存降至 $O(\sqrt{N})$，代价是约 33% 额外计算。
+- ZeRO 优化：把优化器状态/梯度/参数分片到多卡，线性降低每卡显存，代价是增加通信量。
+- Offloading：把部分数据卸载到 CPU 内存或 NVMe，突破单卡上限，代价是 PCIe 带宽成为瓶颈。这些策略并非互斥，实践中常组合使用（如 ZeRO Stage 2 + 混合精度 + 梯度检查点）。（详见第 8.2 节）
+
+</details>
+
+**8. 能用 `nvidia-smi` 查看 GPU 状态、拓扑信息**
+
+<details>
+<summary>参考答案</summary>
+
+- `nvidia-smi`：查看驱动可见的 GPU、显存占用和进程等基本状态。
+- `nvidia-smi topo -m`：查看 GPU 间的互联拓扑（哪些卡走 NVLink、哪些走 PCIe）。
+- `nvidia-smi nvlink -s`：查看 NVLink 链路状态。拓扑信息直接影响分布式并行策略的设计。（详见第 9.2 节）
+
+</details>
+
+**9. 能说出 NVLink 和 PCIe 在带宽上的数量级差异**
+
+<details>
+<summary>参考答案</summary>
+
+- PCIe 5.0 双向带宽 128 GB/s；NVLink 4.0（Hopper/H100）全双工 900 GB/s，NVLink 5.0（Blackwell/B200）1,800 GB/s——相差约一个数量级。
+- NVSwitch 把机内所有 NVLink 连接起来实现 All-to-All 全带宽通信；跨机则靠 InfiniBand NDR（400 Gb/s，约 50 GB/s）。
+- 因此设计分布式策略时，通信量大的并行维度（如张量并行）放在高带宽的机内 NVLink 上，通信量较小的（数据并行、流水线并行）放在机间 InfiniBand 上。（详见第 9.1、9.2 节）
+
+</details>
+
+**10. 能估算一个 7B 参数模型使用 Adam + FP16 混合精度训练时的显存占用**
+
+<details>
+<summary>参考答案</summary>
+
+- Adam + FP16 混合精度下每个参数约需 18 字节：FP16 参数 2 B + FP32 参数副本（master weights）4 B + FP32 梯度 4 B + Adam 一阶动量 4 B + Adam 二阶动量 4 B。
+- 7B 模型的固定显存 = $7\times10^9 \times 18 = 126$ GB，这还不算激活值。
+- 这也是实际显存占用可达参数量 4~8 倍的原因，以及混合精度、ZeRO 等优化策略存在的动机。（详见第 8.1 节）
+
+</details>
 
 ---
 

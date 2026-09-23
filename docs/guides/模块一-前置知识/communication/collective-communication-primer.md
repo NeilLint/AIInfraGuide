@@ -597,17 +597,127 @@ $$
 
 ## 🎯 自我检验清单
 
-- 能说出 NVLink 4.0 与 PCIe 5.0 的带宽对比（900 GB/s vs 64 GB/s，约 14 倍），并解释这对张量并行的影响
-- 能在 8 卡机器上用 `nvidia-smi topo -m` 读懂拓扑输出，判断哪些卡走 NVLink、哪些走 PCIe
-- 能画出 AllReduce、AllGather、ReduceScatter 的数据流动示意图，说出各自的典型用途及通信量公式
-- 能用 PyTorch 的 `torch.distributed` API 编写 AllReduce / AllGather / Send/Recv 代码
-- 能写出 Ring AllReduce 的通信量公式 $\frac{2(N-1)}{N} \times M$，并解释为什么它与 GPU 数量基本无关
-- 能对比 Ring AllReduce 与 Tree AllReduce 的延迟和带宽利用率，说出各自的适用场景
-- 能解释 DDP bucket 机制如何实现通信计算 Overlap，以及 `bucket_cap_mb` 调参的权衡原则
-- 能解释 InfiniBand 与 RoCE 的区别，给出各自的适用场景
-- 能用 `nccl-tests` 测量 8 卡 AllReduce 带宽，区分 `algbw` 与 `busbw`，并判断结果是否正常
-- 能用 `NCCL_DEBUG=INFO` 和 `NCCL_ALGO` 排查多卡训练中的通信问题
-- 能从通信视角解释"为什么 TP 限制在机内而 PP 可以跨机"
+**1. 能说出 NVLink 4.0 与 PCIe 5.0 的带宽对比（900 GB/s vs 64 GB/s，约 14 倍），并解释这对张量并行的影响**
+
+<details>
+<summary>参考答案</summary>
+
+- NVLink 4.0（H100）每 GPU 18 条链路、每条 50 GB/s，总带宽 900 GB/s；PCIe 5.0 x16 单向 64 GB/s（双向 128 GB/s），NVLink 4.0 约是它的 14 倍（NVLink 5.0 约 28 倍）。
+- 张量并行在每一层前向和反向都要做 AllReduce，通信频率最高且通信量与激活大小相关；这个带宽差距决定了一条工程准则：需要高频通信的并行策略（如 TP）必须限制在 NVLink 互联的范围内，否则会被低速链路拖垮。（详见第 1.1、1.2、4.3 节）
+
+</details>
+
+**2. 能在 8 卡机器上用 `nvidia-smi topo -m` 读懂拓扑输出，判断哪些卡走 NVLink、哪些走 PCIe**
+
+<details>
+<summary>参考答案</summary>
+
+- `NV18`：通过 18 条 NVLink 连接（NVLink 4.0 满配）；`PHB`：通过 PCIe Host Bridge 连接；`NODE`：同一 NUMA 节点内通过 PCIe 连接；`SYS`：跨 NUMA 节点，需经过系统总线。
+- 规划并行策略时，应把 TP 组内的 GPU 放在 NVLink 互联的卡上，把通信量较小的 PP 或 DP 分配给跨 PCIe 或跨机的链路。（详见第 1.4 节）
+
+</details>
+
+**3. 能画出 AllReduce、AllGather、ReduceScatter 的数据流动示意图，说出各自的典型用途及通信量公式**
+
+<details>
+<summary>参考答案</summary>
+
+- AllReduce：所有卡的数据按元素聚合（如求和）后，每张卡都拿到完整结果（等价于 Reduce + Broadcast）；典型用途是数据并行（DDP）梯度同步；每 rank 通信量约 $2M$。
+- AllGather：每张卡持有一片数据，结束后人人拿到全部分片拼成的完整数据；典型用途是 ZeRO-3 前向前收集完整参数；每 rank 通信量 $(N-1)M/N$。
+- ReduceScatter：先按元素归约，再把结果分片，每张卡只保留属于自己那一片的归约结果；典型用途是 ZeRO 系列的梯度分片存储；每 rank 通信量 $(N-1)M/N$。
+- 关键恒等式：AllReduce = ReduceScatter + AllGather，这正是 Ring AllReduce 算法的核心思想。（详见第 4.1、4.2 节）
+
+</details>
+
+**4. 能用 PyTorch 的 `torch.distributed` API 编写 AllReduce / AllGather / Send/Recv 代码**
+
+<details>
+<summary>参考答案</summary>
+
+- 先初始化进程组：`dist.init_process_group(backend="nccl", rank=..., world_size=...)`，并 `torch.cuda.set_device(rank)`。
+- AllReduce：`dist.all_reduce(tensor, op=dist.ReduceOp.SUM)`，所有卡的 tensor 求和且每卡都拿到结果。
+- AllGather：`dist.all_gather(gathered_list, local_chunk)`，把各卡的分片收集到列表中。
+- 点对点：发送方 `dist.send(tensor, dst=1)`，接收方 `dist.recv(tensor, src=0)`；PP 中 micro-batch 激活值的跨机传递就依赖它。（详见第 3、8.3 节）
+
+</details>
+
+**5. 能写出 Ring AllReduce 的通信量公式 $\frac{2(N-1)}{N} \times M$，并解释为什么它与 GPU 数量基本无关**
+
+<details>
+<summary>参考答案</summary>
+
+- Ring AllReduce 把数据均分为 $N$ 块，分 ReduceScatter 和 AllGather 两个阶段，各进行 $N-1$ 轮环形传递，每轮每 rank 发送 $M/N$ 字节。
+- 因此每 rank 总通信量为 $2 \times (N-1) \times \frac{M}{N} = \frac{2(N-1)}{N} \times M$；当 $N$ 较大时 $\frac{N-1}{N} \to 1$，通信量趋近于 $2M$，与节点数基本无关，因此是带宽最优（bandwidth-optimal）的，线性扩展性极佳。
+- 但 $2(N-1)$ 轮传递意味着延迟随节点数线性增长，它不是延迟最优。（详见第 5.2、5.3 节）
+
+</details>
+
+**6. 能对比 Ring AllReduce 与 Tree AllReduce 的延迟和带宽利用率，说出各自的适用场景**
+
+<details>
+<summary>参考答案</summary>
+
+- Ring：端到端延迟 $O(N)$，大数据量下带宽利用率接近 100%，最适合梯度同步等大张量通信。
+- Tree：以树形拓扑做 Reduce（叶到根）+ Broadcast（根到叶），各 $\lceil \log_2 N \rceil$ 步，延迟 $O(\log N)$，但根节点是瓶颈、带宽利用率较低，最适合小数据量场景（如同步标量 loss、step）。
+- NCCL 内部会根据数据大小自动在 Ring 和 Tree 之间切换，也可用 `NCCL_ALGO=Ring/Tree` 强制指定。（详见第 5.3、6 节）
+
+</details>
+
+**7. 能解释 DDP bucket 机制如何实现通信计算 Overlap，以及 `bucket_cap_mb` 调参的权衡原则**
+
+<details>
+<summary>参考答案</summary>
+
+- 核心思想：在 GPU 反向传播计算后续层梯度的同时，并行传输已就绪的前面层梯度，把通信延迟“藏进”计算时间里。
+- DDP 把模型参数分组为若干 bucket，一个 bucket 内所有参数的梯度算完后立即异步触发 AllReduce，无需等待整个模型的梯度全部就绪。
+- `bucket_cap_mb`（默认 25MB）的权衡：太大导致等待时间长（需积累更多梯度才触发），太小导致通信次数多（每次通信有固定启动开销）；25MB 是较好的起点，可按模型层大小调整。（详见第 7 节）
+
+</details>
+
+**8. 能解释 InfiniBand 与 RoCE 的区别，给出各自的适用场景**
+
+<details>
+<summary>参考答案</summary>
+
+- 两者都基于 RDMA（零拷贝、内核旁路、微秒级延迟，允许直接读写远端内存、绕过 CPU 和内核）。
+- InfiniBand：原生 RDMA，延迟约 1 μs，拥塞控制由硬件完成，带宽 400-800 Gb/s，需要专用交换机和 HCA 网卡、成本高；适合追求极致性能和大规模稳定性的大型 AI Lab、万卡集群。
+- RoCE v2：在 UDP/IP 三层上跑 RDMA、可路由，延迟约 2-5 μs，拥塞控制依赖 ECN/PFC 软件配置，可复用以太网基础设施、成本适中；适合预算受限的云厂商和中小规模集群。
+- 两者对上层训练代码（PyTorch/DeepSpeed）完全透明，NCCL 会自动选择可用的传输方式。（详见第 2.2–2.4 节）
+
+</details>
+
+**9. 能用 `nccl-tests` 测量 8 卡 AllReduce 带宽，区分 `algbw` 与 `busbw`，并判断结果是否正常**
+
+<details>
+<summary>参考答案</summary>
+
+- 编译 nccl-tests 后运行 `./build/all_reduce_perf -b 8 -e 256M -f 2 -g 8` 做单机 8 卡测试，多机用 mpirun 启动。
+- algbw（算法带宽）= 数据量 / 时间，反映应用层看到的吞吐；busbw（总线带宽）= algbw × $\frac{2(N-1)}{N}$，修正了算法传输倍数，反映硬件链路的实际利用率。
+- 对照硬件理论带宽应看 busbw：8x H100 SXM 单机 AllReduce 的 busbw 应接近约 850 GB/s（NVLink 4.0 理论 900 GB/s 的约 95%）；如果实测远低于此值，说明 NVLink 拓扑或 NCCL 配置存在问题。（详见第 8.5 节）
+
+</details>
+
+**10. 能用 `NCCL_DEBUG=INFO` 和 `NCCL_ALGO` 排查多卡训练中的通信问题**
+
+<details>
+<summary>参考答案</summary>
+
+- `NCCL_DEBUG=INFO python train.py` 可查看 NCCL 的拓扑感知结果、算法选择和实际传输路径（NVLink/PCIe/IB），是多机扩展效率差时的首选排查手段；`NCCL_DEBUG_SUBSYS`、`NCCL_TOPO_DUMP_FILE` 可进一步过滤日志、导出拓扑。
+- `NCCL_ALGO=Ring/Tree` 强制切换通信算法做对比测试，用于排查带宽远低于理论值时算法选择不优的问题；`NCCL_PROTO` 可强制传输协议。
+- 网络相关：`NCCL_SOCKET_IFNAME` 指定网口，`NCCL_IB_HCA` 指定 IB 网卡，`NCCL_NET_GDR_LEVEL` 控制 GPUDirect RDMA，`NCCL_BUFFSIZE` 调整通信缓冲区（默认 4MB）。排查顺序：先用 nccl-tests 测实际带宽，再用这些变量定位。（详见第 8.4、9.4 节）
+
+</details>
+
+**11. 能从通信视角解释“为什么 TP 限制在机内而 PP 可以跨机”**
+
+<details>
+<summary>参考答案</summary>
+
+- TP 在每个 Transformer 层的 Attention 和 MLP 子模块前向、反向各需 1 次 AllReduce，每层合计 4 次；80 层的模型就是 320 次 AllReduce，且通信量与激活大小相关。
+- 按每次 AllReduce 搬运 1GB 估算：走 NVLink 4.0（900 GB/s）每次约 1.1 ms、320 次共约 0.35 秒；走 IB NDR（50 GB/s）每次约 20 ms、共约 6.4 秒——相差 18 倍，训练速度会断崖式下降，这就是 TP 不跨机的物理原因。
+- PP 只在 stage 边界用点对点 Send/Recv 传递 micro-batch 激活值，通信频率和数据量都较小，IB 网络完全能够承载；其代价不是通信带宽而是流水线气泡，气泡占比为 $\frac{P-1}{P-1+M}$，可通过增大 micro-batch 数量 $M$ 缓解。（详见第 9.1、9.3 节）
+
+</details>
 
 ## 📚 参考资料
 

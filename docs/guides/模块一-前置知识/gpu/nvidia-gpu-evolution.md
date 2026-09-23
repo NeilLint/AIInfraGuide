@@ -416,14 +416,96 @@ graph LR
 
 ## 🎯 自我检验清单
 
-- 能说出 NVIDIA 五代 AI GPU 架构的名称、年份和代表产品
-- 能解释 Tensor Core 与 CUDA Core 的本质区别
-- 能说明 FP32、TF32、BF16、FP16、FP8 各自的位宽和适用场景
-- 能解释 MIG 的作用和适用场景，并用 `nvidia-smi` 命令查看/创建 MIG 实例
-- 能说明 Transformer Engine 的工作原理（FP8/BF16 动态切换）
-- 能比较 NVLink 各代的带宽差异，理解其对分布式训练的意义
-- 能根据训练/推理场景的不同需求推荐合适的 GPU 型号
-- 能解释 Blackwell 双芯封装和 GB200 CPU-GPU 紧耦合设计的价值
+**1. 能说出 NVIDIA 五代 AI GPU 架构的名称、年份和代表产品**
+
+<details>
+<summary>参考答案</summary>
+
+- Volta（2017，V100）：首次引入 Tensor Core。
+- Turing（2018，T4）：INT8/INT4 推理加速、RT Core。
+- Ampere（2020，A100）：第三代 Tensor Core、MIG、TF32、BF16。
+- Hopper（2022，H100）：FP8、Transformer Engine、NVLink 4.0。
+- Blackwell（2024，B200/GB200）：第五代 Tensor Core、NVLink 5.0、双芯封装。（详见第 2 节）
+
+</details>
+
+**2. 能解释 Tensor Core 与 CUDA Core 的本质区别**
+
+<details>
+<summary>参考答案</summary>
+
+- CUDA Core 是“万金油”式通用计算核心，每个时钟周期处理一次标量的乘加运算（FMA），没有针对矩阵乘法做专门优化。
+- Tensor Core 是专为矩阵乘累加（MMA，$D = A \times B + C$）设计的硬件单元：Volta 上一个 Tensor Core 每周期完成一个 $4\times4\times4$ 的混合精度矩阵乘累加，一次操作就是 64 次乘加，效率比逐元素计算提升一个数量级。
+- 要充分利用 Tensor Core，矩阵维度需满足对齐要求（如 8 的倍数），并使用混合精度（FP16 计算 + FP32 累加），这也是 AMP 混合精度训练的硬件基础。（详见第 3.2、3.4 节）
+
+</details>
+
+**3. 能说明 FP32、TF32、BF16、FP16、FP8 各自的位宽和适用场景**
+
+<details>
+<summary>参考答案</summary>
+
+- FP32：1+8+23，共 32 位，基准精度。
+- TF32：1+8+10，共 19 位，保留 FP32 的数值范围、用 FP16 的尾数精度；Ampere 上默认开启，FP32 matmul 不改代码即可自动加速。
+- FP16：1+5+10，共 16 位，指数位少、易溢出，混合精度训练需配合 loss scaling。
+- BF16：1+8+7，共 16 位，数值范围与 FP32 相同，避免了 FP16 的溢出问题，是 Ampere 之后 LLM 训练的主流精度。
+- FP8（Hopper 引入）：E4M3（1+4+3）精度优先、用于前向传播；E5M2（1+5+2）范围优先、用于反向传播；理论算力是 BF16 的两倍。（详见第 5.2、6.2 节）
+
+</details>
+
+**4. 能解释 MIG 的作用和适用场景，并用 `nvidia-smi` 命令查看/创建 MIG 实例**
+
+<details>
+<summary>参考答案</summary>
+
+- MIG（Multi-Instance GPU）把一块 A100 物理隔离为最多 7 个独立 GPU 实例，每个实例拥有独立的显存、缓存和计算资源，互不干扰。
+- 适用：多个推理服务共享一块卡、开发/调试阶段多人共用；不适合需要完整 GPU 算力的大模型训练。
+- 命令：`nvidia-smi mig -lgip` 查看支持的 MIG 配置；`sudo nvidia-smi mig -cgi 9,9 -C` 创建实例（如 3g.20gb）；`nvidia-smi mig -lgi` 查看已创建的实例。（详见第 5.2 节）
+
+</details>
+
+**5. 能说明 Transformer Engine 的工作原理（FP8/BF16 动态切换）**
+
+<details>
+<summary>参考答案</summary>
+
+- Transformer Engine 是软硬件协同机制：它在每一层计算前动态分析张量的数值分布，自动决定这一层用 FP8 还是 BF16/FP16。
+- 类比“自动挡”——数值稳定的层挂高速档（FP8），数值敏感的层自动降档（BF16），从而在降低精度的同时保住模型质量。
+- 实践中 FP8 + Transformer Engine 可将训练吞吐提升 30%-60%（取决于模型结构）；代码上通过 `te.Linear` 替换标准层并用 `te.fp8_autocast` 启用。（详见第 6.2、6.4 节）
+
+</details>
+
+**6. 能比较 NVLink 各代的带宽差异，理解其对分布式训练的意义**
+
+<details>
+<summary>参考答案</summary>
+
+- NVLink 2.0（V100）300 GB/s → NVLink 3.0（A100）600 GB/s → NVLink 4.0（H100）900 GB/s → NVLink 5.0（B200）1,800 GB/s，双向带宽持续翻倍；连接范围也从节点内 8 卡扩展到通过 NVLink Switch 连接 72 卡。
+- 互联带宽是多卡 All-Reduce 等通信的物理上限，是分布式训练效率提升的硬件基础；B200 的 1.8 TB/s 已接近单卡显存带宽，过去需要精心设计通信拓扑规避的瓶颈可以用带宽直接解决。
+- 注意 H100 的 SXM 版通过 NVSwitch 支持 8 卡全互联，PCIe 版仅支持 2 卡桥接，选型时要区分。（详见第 6.2、7.2、8.2 节）
+
+</details>
+
+**7. 能根据训练/推理场景的不同需求推荐合适的 GPU 型号**
+
+<details>
+<summary>参考答案</summary>
+
+- 训练：中小模型（<10B）选 A100 80GB（性价比高、生态成熟）；大模型（10B-100B）选 H100 SXM（FP8 + NVLink 4.0 提升多卡效率）；超大模型（>100B）选 B200/GB200（192GB 显存 + 1.8TB/s NVLink）。
+- 推理：低成本在线推理选 T4（70W 低功耗、INT8 够用）；中等规模 LLM 选 A100/L40S；大规模 LLM 选 H100/H200（FP8 吞吐高、HBM3 带宽足）；极致性能选 B200（FP4 支持、192GB 显存）。
+- 除单卡性能外，还要考虑集群网络拓扑（NVLink/PCIe/InfiniBand）、功耗散热和供应链交付周期——选型从来不是纯技术问题。（详见第 9 节）
+
+</details>
+
+**8. 能解释 Blackwell 双芯封装和 GB200 CPU-GPU 紧耦合设计的价值**
+
+<details>
+<summary>参考答案</summary>
+
+- 双芯封装：B200 由两块 die 通过 10 TB/s 的片间互联封装在同一块芯片上，对外表现为一块完整 GPU——编程方式不变，算力翻倍；这是在单 die 性能增长放缓后，从芯片互联层面寻求突破的设计哲学。
+- GB200 把 NVIDIA 自研的 Grace ARM CPU 与 Blackwell GPU 通过高速 NVLink-C2C 互联封装成 CPU-GPU 超级芯片，消除了传统 PCIe 的 CPU-GPU 通信瓶颈，并额外提供 480 GB LPDDR5x CPU 内存。（详见第 7.2、7.3 节）
+
+</details>
 
 ## 📚 参考资料
 

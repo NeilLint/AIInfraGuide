@@ -533,14 +533,110 @@ vLLM 通过 **PagedAttention** 和 **Continuous Batching** 两大核心技术，
 
 ## 🎯 自我检验清单
 
-- 能解释 PagedAttention 的核心思想及其解决的显存碎片问题
-- 能使用 `LLM` 和 `SamplingParams` 完成离线批量推理
-- 能正确使用 `llm.chat` 进行 Chat 模式推理，理解 Chat Template 的重要性
-- 能用 `vllm serve` 启动 OpenAI 兼容的在线推理服务
-- 能使用 Python openai 客户端调用 vLLM 服务
-- 能根据模型大小和 GPU 显存选择合适的 `tensor-parallel-size`
-- 能通过调整 `gpu-memory-utilization` 和 `max-model-len` 解决 OOM 问题
-- 能说出 vLLM 与传统推理方式在显存管理上的核心区别
+**1. 能解释 PagedAttention 的核心思想及其解决的显存碎片问题**
+
+<details>
+<summary>参考答案</summary>
+
+- 核心思想：把操作系统虚拟内存分页的方式搬到 KV Cache 管理上——KV Cache 切成固定大小的 Block（如 16 个 token 一块），不再要求连续内存；每个请求维护 Block Table 记录逻辑块到物理块的映射；Token 生成时按需分配（当前 Block 填满才分配新块）；相同前缀（如 System Prompt）可共享同一组物理 Block（写时复制）。
+- 解决的问题：传统做法按最大序列长度为每个请求预分配一整块连续显存，带来**内部碎片**（大多数请求用不到最大长度，预留浪费）、**外部碎片**（释放的空间大小不一、难以复用）和**无法共享**（Beam Search 等场景共享前缀做不到）三个问题。
+- 代价：KV Cache 物理上不连续，vLLM 需要专门的 CUDA Kernel 从分散的 Block 中高效读取数据做 Attention。
+
+（对应正文 2.1、2.2 节）
+
+</details>
+
+**2. 能使用 `LLM` 和 `SamplingParams` 完成离线批量推理**
+
+<details>
+<summary>参考答案</summary>
+
+- 三步：`SamplingParams(temperature=0.8, top_p=0.95, max_tokens=256)` 定义采样参数 → `LLM(model="Qwen/Qwen2.5-7B-Instruct")` 加载模型（自动下载 HuggingFace 模型）→ `llm.generate(prompts, sampling_params)` 传入 prompt 列表批量生成，从 `output.outputs[0].text` 取结果。
+- `LLM` 构造时会一次性把模型加载进 GPU，默认使用 90\% 可用显存（权重 + KV Cache），可用 `gpu_memory_utilization` 调整。
+- 离线推理适合不需要实时响应的场景：批量文本生成、数据标注、评测跑分等。
+- 注意 vLLM 默认会读取模型仓库的 `generation_config.json` 覆盖默认采样值，想用 vLLM 自身默认值需显式设置 `generation_config="vllm"`。
+
+（对应正文 4.1、4.3 节）
+
+</details>
+
+**3. 能正确使用 `llm.chat` 进行 Chat 模式推理，理解 Chat Template 的重要性**
+
+<details>
+<summary>参考答案</summary>
+
+- 推荐方式：`llm.chat(messages_list, sampling_params)`，直接传入 `[{"role": "system"/"user", "content": ...}]` 消息列表，vLLM 会自动应用模型的 Chat Template。
+- 备选方式：先用 `tokenizer.apply_chat_template(messages_list, tokenize=False, add_generation_prompt=True)` 手动生成模板化文本，再交给 `llm.generate`。
+- 重要性：`llm.generate` **不会**自动应用 Chat Template，直接给 Chat 模型传裸文本，输出质量可能很差甚至乱码——这也是常见排错项之一。
+
+（对应正文 4.2、8.2 节）
+
+</details>
+
+**4. 能用 `vllm serve` 启动 OpenAI 兼容的在线推理服务**
+
+<details>
+<summary>参考答案</summary>
+
+- 一行命令：`vllm serve Qwen/Qwen2.5-7B-Instruct`，默认监听 `http://localhost:8000`；可用 `--host 0.0.0.0 --port 8080` 自定义地址端口，`--tensor-parallel-size 2` 启用多卡。
+- 生产环境建议用 `--api-key my-secret-key`（或环境变量 `VLLM_API_KEY`）开启认证。
+- 暴露的主要端点：`GET /v1/models`（列模型）、`POST /v1/completions`（文本补全）、`POST /v1/chat/completions`（对话补全）、`GET /health`（健康检查）。
+
+（对应正文 5.1、5.4、5.5 节）
+
+</details>
+
+**5. 能使用 Python openai 客户端调用 vLLM 服务**
+
+<details>
+<summary>参考答案</summary>
+
+- 只需修改 `base_url`，其余代码与调用 OpenAI 完全相同：`client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")`（vLLM 默认不需要认证；若服务端开了 `--api-key`，这里填对应的 key）。
+- 对话补全：`client.chat.completions.create(model=..., messages=[...], temperature=0.7, max_tokens=512)`，结果在 `response.choices[0].message.content`。
+- 文本补全：`client.completions.create(model=..., prompt=..., max_tokens=256)`，结果在 `completion.choices[0].text`。
+
+（对应正文 5.2、5.3 节）
+
+</details>
+
+**6. 能根据模型大小和 GPU 显存选择合适的 `tensor-parallel-size`**
+
+<details>
+<summary>参考答案</summary>
+
+- FP16 下权重约 2 字节/参数：7B ≈ 14 GB（1× A100 80G 或 1× L40S 48G 即可）、13B ≈ 26 GB（1× A100 80G）、34B ≈ 68 GB（1× A100 需降低 max_model_len，或 2× A100）、70B ≈ 140 GB（2× A100 80G）、405B ≈ 810 GB（16× A100 80G 或 8× H100 80G）。
+- 实际所需显存 = 模型权重 + KV Cache + 运行时开销，不能只按权重估。
+- 单卡装不下时用 `--tensor-parallel-size N` 把各层权重矩阵按列/行切分到多卡；也可用量化（如 AWQ INT4）把权重缩减约 4 倍，用更少的 GPU 服务更大的模型。
+
+（对应正文 7.1、7.2 节）
+
+</details>
+
+**7. 能通过调整 `gpu-memory-utilization` 和 `max-model-len` 解决 OOM 问题**
+
+<details>
+<summary>参考答案</summary>
+
+- 显存分配方式：总 GPU 显存 × `gpu_memory_utilization`（默认 0.9）= 模型权重 + KV Cache + 临时缓冲区；KV Cache 可用空间 = 总配额 - 权重 - 固定开销。
+- 启动 OOM 的四种解法：降低 `--gpu-memory-utilization`（如 0.8）；缩短 `--max-model-len`（如 2048，减少 KV Cache 预留）；增加 `--tensor-parallel-size` 分摊到多卡；使用量化模型（如 `--quantization awq`）。
+- 权衡：KV Cache 越大能同时处理的请求越多、吞吐越高，所以压缩显存配额是在用吞吐换稳定，按需取舍。
+
+（对应正文 6.3、8.1 节）
+
+</details>
+
+**8. 能说出 vLLM 与传统推理方式在显存管理上的核心区别**
+
+<details>
+<summary>参考答案</summary>
+
+- 传统方式：为每个请求按最大序列长度**预分配一块连续显存**——像餐厅里每桌客人不管几个人都占一间最大的包房，造成内部/外部碎片，且无法共享前缀 KV。
+- vLLM：用 PagedAttention 把 KV Cache 分成固定大小 Block、按需分配、Block Table 映射、允许物理不连续和跨请求共享，显存利用率接近最优。
+- 再配合 Continuous Batching（动态把新请求插入正在处理的批次，而非等一批全部完成再开始下一批），共同带来高显存利用率与高吞吐。
+
+（对应正文第 1 节、2.1、2.2 节）
+
+</details>
 
 ## 📚 参考资料
 

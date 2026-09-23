@@ -1224,20 +1224,205 @@ cuobjdump -sass kernel
 
 完成本文学习后，你应该能够：
 
-- 能解释 Grid → Block → Thread 的三层结构，并根据数据规模配置合适的 Block 大小
-- 能区分 GPU 的 5 种内存类型（寄存器、Local、Shared、Global、Constant），并说明各自的作用域和生命周期
-- 能解释什么是 Warp、合并访存（Coalesced Access）和 Bank Conflict
-- 能解释 SM、CUDA Core、Tensor Core、Warp Scheduler、寄存器文件分别负责什么
-- 能用自己的话解释延迟隐藏，以及它和 Occupancy 的关系
-- 能判断一个 Kernel 是 memory-bound 还是 compute-bound，并知道算术强度 / Roofline 模型在说什么
-- 能区分 PTX、SASS、Compute Capability，并解释 `-arch=` 参数的作用
-- 能编写一个基本的 CUDA Kernel（如向量加法），并用 nvcc 编译运行
-- 能独立编写一个正确的 Reduce kernel，并做至少两轮优化（Warp Shuffle + 多元素累加）
-- 能实现 Tiled GEMM 并解释为什么 Tiling 能减少全局内存访问
-- 能写出 Online Softmax 的算法流程，解释为什么它比 Naive Softmax 更好
-- 能解释 FlashAttention 的核心思想（Tiling + Online Softmax + 不存中间矩阵）
-- 能使用 Triton 编写一个简单的 kernel（如向量加法或 Softmax），并与 PyTorch 结果对比
-- 能用 Nsight Compute 分析自己写的 kernel，判断是 memory bound 还是 compute bound
+**1. 能解释 Grid → Block → Thread 的三层结构，并根据数据规模配置合适的 Block 大小**
+
+<details>
+<summary>参考答案</summary>
+
+- Grid 是一次 Kernel 启动创建的全部线程集合（整个学校），Block 是可协作的线程组（班级，可通过共享内存这块"黑板"交流），Thread 是最小执行单位（学生）。
+- 一个 Block 会被调度到一个 SM 上；Block 内线程可以紧密协作（共享内存、屏障同步），不同 Block 之间只能通过全局内存和原子操作间接协作，且执行顺序不确定——不能假设哪个 Block 先跑。
+- Block 内线程数最多 1024，且应始终选 32 的倍数与 Warp 对齐；256 是大多数场景的最佳起点（8 个 Warp），访存密集型可用 128，计算密集型可用 512-1024（注意寄存器和共享内存压力）。
+- Grid 大小按数据规模向上取整：`int gridSize = (N + blockSize - 1) / blockSize;`，Kernel 内配合 `if (idx < n)` 边界检查。
+
+（对应正文 2.1、2.2、5 节）
+
+</details>
+
+**2. 能区分 GPU 的 5 种内存类型（寄存器、Local、Shared、Global、Constant），并说明各自的作用域和生命周期**
+
+<details>
+<summary>参考答案</summary>
+
+- **寄存器**：片上最快存储，线程私有、随线程存亡；kernel 局部变量默认放这里，每线程约 255 个。
+- **Local Memory**：寄存器"溢出"后的去处，名字叫 local，实际在 HBM，速度骤降（编译输出出现 stack frame / spill 即有溢出）。
+- **共享内存（Shared）**：片上可编程缓存，Block 内所有线程共享、随 Block 存在（每 SM 约 228KB），手动管理，典型用途是缓存全局内存数据供 Block 内复用。
+- **全局内存（Global/HBM）**：即"显存"，所有线程可访问，容量最大（80-192GB）但延迟最高（约 400-600 cycles），由 `cudaMalloc`/`cudaFree` 显式管理，跨 Kernel 存活。
+- **常量内存（Constant）**：64KB 只读区域，有专用缓存，所有线程读同一地址（广播）时最高效，用 `cudaMemcpyToSymbol` 写入。
+
+（对应正文 3.2-3.6 节）
+
+</details>
+
+**3. 能解释什么是 Warp、合并访存（Coalesced Access）和 Bank Conflict**
+
+<details>
+<summary>参考答案</summary>
+
+- **Warp**：GPU 执行的最小调度单位，由 32 个连续线程组成，同一时刻执行相同指令（SIMT）；Warp 内线程走不同 if/else 分支会产生 Warp Divergence，两个分支被串行执行、性能减半。
+- **合并访存**：全局内存优化的黄金法则——同一 Warp 的 32 个线程访问连续地址时，硬件把多次访问合并为少量内存事务（如一次 128B 事务搞定）；跨步或随机访问需要多次事务，浪费带宽。
+- **Bank Conflict**：共享内存分为 32 个 Bank、每个 Bank 宽 4 字节；同一 Warp 内不同线程访问同一 Bank 的不同地址时访问被串行化。经典解法是 Padding：`__shared__ float smem[32][33]` 多加一列错开 Bank。
+- 记忆点："连续访问"在全局内存对应合并访问，在共享内存对应无 Bank Conflict。
+
+（对应正文 4.1、3.4、4.2 节）
+
+</details>
+
+**4. 能解释 SM、CUDA Core、Tensor Core、Warp Scheduler、寄存器文件分别负责什么**
+
+<details>
+<summary>参考答案</summary>
+
+- **SM（流式多处理器）**：GPU 的"核心盒子"，类似 CPU 核心但一次性承载大量 Warp（H100 有 132 个 SM）。
+- **CUDA Core**：SM 内的标量算术单元，执行整数、FP32/FP64 等普通运算。
+- **Tensor Core**：SM 内的矩阵乘法专用单元，单条指令处理一大块矩阵乘加，是现代 AI 的主要算力来源，算力往往是 CUDA Core 的几十到上百倍。
+- **Warp Scheduler**：SM 内的调度器，每周期从就绪 Warp 中挑一个发射指令。
+- **Register File**：SM 的高速寄存器池，所有线程的寄存器都从这里分配，是决定 Occupancy 的关键资源。
+- 此外 SM 还有一段 L1 数据缓存（片上 SRAM），其中一部分可被程序员"借用"为共享内存。
+
+（对应正文 4.4 节）
+
+</details>
+
+**5. 能用自己的话解释延迟隐藏，以及它和 Occupancy 的关系**
+
+<details>
+<summary>参考答案</summary>
+
+- GPU 快并不是因为没有内存延迟，而是靠**同时供养大量 Warp**：当一个 Warp 在等内存时，Warp 调度器立刻切换去执行别的 Warp，用"别人干活"掩盖等待——这就是延迟隐藏（latency hiding）。
+- Occupancy = 实际活跃 Warp 数 / SM 最大 Warp 数，反映可供切换的 Warp 是否充足；Block 太小、每线程寄存器太多、共享内存占用过多都会压低它，让 GPU"没活干"。
+- 但 Occupancy 不是越高越好：一旦 Warp 数已能覆盖内存访问的等待周期，再增加反而分掉寄存器和共享内存资源；Tensor Core 密集型 kernel 25-50% 的 Occupancy 就可能达到峰值性能。
+- 优化顺序：先保证没有寄存器溢出，再考虑 Occupancy；最终目标是让当前受限资源（算力或带宽）利用率尽量高。
+
+（对应正文 4.1、4.3 节）
+
+</details>
+
+**6. 能判断一个 Kernel 是 memory-bound 还是 compute-bound，并知道算术强度 / Roofline 模型在说什么**
+
+<details>
+<summary>参考答案</summary>
+
+- **算术强度** = 每搬运一个字节对应执行多少次算术操作（FLOPs/byte）。强度低的 Kernel 容易内存受限（瓶颈是显存带宽），强度高的容易计算受限（瓶颈是 CUDA Core / Tensor Core 吞吐）。
+- 逐元素加 / ReLU 每读一个 float 只做一两次操作，是典型 memory-bound——这也是算子融合能大幅提速的原因；矩阵乘法 O(N³) 计算 / O(N²) 内存，算术强度随 N 线性增长，天生适合 GPU。
+- Roofline 的"脊点"是从内存受限转为计算受限的临界算术强度：A100 约 156 FLOPs/byte，H100 约 295，B200 约 281（BF16 Tensor Core）。
+- 实操上用 Nsight Compute 看 `Compute (SM) Throughput` 和 `Memory Throughput` 两个指标，即可判断 Kernel 卡在哪个屋顶下。
+
+（对应正文 4.5、9.1 节）
+
+</details>
+
+**7. 能区分 PTX、SASS、Compute Capability，并解释 `-arch=` 参数的作用**
+
+<details>
+<summary>参考答案</summary>
+
+- **PTX**：CUDA C++ 编译后得到的虚拟指令集中间表示，不绑定具体 GPU；只要新硬件支持该 PTX 版本，驱动可以把它 JIT 编译成对应机器码——这也是一份 CUDA 代码能在未来新 GPU 上运行的原因。
+- **SASS**：NVIDIA GPU 真正执行的汇编级指令，与具体 SM 架构绑定（如 `sm_90` 对应 Hopper）；看到 `HMMA` 这类指令就能确认 Kernel 确实喂给了 Tensor Core。
+- **Compute Capability**：GPU 的"能力版本号"（如 7.0、9.0、10.0），决定支持哪些 PTX 特性和硬件指令。
+- `-arch=sm_90` 就是告诉编译器"按 H100 代硬件生成代码"；编译链路是先生成 PTX，再由 ptxas 或驱动编译成目标硬件的 SASS。
+
+（对应正文 1.3、9.4 节）
+
+</details>
+
+**8. 能编写一个基本的 CUDA Kernel（如向量加法），并用 nvcc 编译运行**
+
+<details>
+<summary>参考答案</summary>
+
+- Kernel 用 `__global__` 声明，内部用 `int idx = blockIdx.x * blockDim.x + threadIdx.x;` 计算全局索引，并做 `if (idx < n)` 边界检查后执行 `c[idx] = a[idx] + b[idx];`。
+- 主机端五步流程：`cudaMalloc` 分配显存 → `cudaMemcpy` Host→Device → `vectorAdd<<<gridSize, blockSize>>>(d_a, d_b, d_c, N)` 启动 → `cudaMemcpy` Device→Host → `cudaFree` 释放。
+- Grid 大小向上取整：`int gridSize = (N + blockSize - 1) / blockSize;`（blockSize 通常取 256）。
+- 用 `CUDA_CHECK` 宏检查每个 API 返回值；Kernel 启动后用 `cudaGetLastError()` 查启动参数错误、`cudaDeviceSynchronize()` 查执行错误。
+- 编译运行：`nvcc -arch=sm_80 vector_add.cu -o vector_add && ./vector_add`。
+
+（对应正文 2、5 节）
+
+</details>
+
+**9. 能独立编写一个正确的 Reduce kernel，并做至少两轮优化（Warp Shuffle + 多元素累加）**
+
+<details>
+<summary>参考答案</summary>
+
+- **基础版（树形归约）**：每线程把一个元素加载进共享内存，`__syncthreads()` 后按步长归约——`for (int step = blockDim.x / 2; step > 0; step >>= 1)`，`tid < step` 的线程执行 `smem[tid] += smem[tid + step]`，每轮后同步；最后 `tid == 0` 把 Block 结果写回全局内存。
+- 步长从大到小是关键：保证活跃线程编号连续，同一 Warp 内不会"一半工作一半空闲"，避免 Warp Divergence。
+- **优化一（展开最后一个 Warp）**：当 `step <= 32` 只剩一个 Warp 时，Warp 内天然 SIMT 锁步执行，不需要 `__syncthreads()`，直接展开最后几轮；也可用 `__shfl_down_sync` 让线程直接读取 `lane_id + delta` 的寄存器值，比共享内存更快（无地址计算、无 Bank Conflict、延迟更低）。
+- **优化二（每线程处理多个元素）**：加载阶段每线程先累加 2 个元素（`gid` 与 `gid + blockDim.x`），不增加 Block 数就翻倍处理数据量，提升线程利用率。
+- Reduce 是典型 Memory-Bound 操作（算术强度仅 0.25 FLOP/Byte），优化核心是提升内存带宽利用率。
+
+（对应正文 6.1 节）
+
+</details>
+
+**10. 能实现 Tiled GEMM 并解释为什么 Tiling 能减少全局内存访问**
+
+<details>
+<summary>参考答案</summary>
+
+- 朴素 GEMM 中每个线程独立从全局内存读 A 的一行和 B 的一列，大量重复读取——不分块时总数据搬运为 M\*N\*K，每个元素要从 HBM 读 K 次。
+- Tiling 把矩阵切成 `TILE_SIZE x TILE_SIZE` 的小块：Block 内线程协作把 A、B 的 Tile 加载进 `__shared__` 数组（越界补零），`__syncthreads()` 后在共享内存上完成该块乘加累积，再滑动到下一个 Tile。
+- 效果：每个 Tile 从 HBM 只读 1 次，在共享内存中被复用 TILE_SIZE 次，**数据复用率提升 TILE_SIZE 倍**。
+- 更高级的优化：`float4` 向量化加载、寄存器分块、双缓冲（加载与计算重叠）、Tensor Core（WMMA/CUTLASS）；实际工程一般直接用 cuBLAS 或 CUTLASS。
+
+（对应正文 6.2 节）
+
+</details>
+
+**11. 能写出 Online Softmax 的算法流程，解释为什么它比 Naive Softmax 更好**
+
+<details>
+<summary>参考答案</summary>
+
+- 数值稳定的 softmax 要先减去 max(x) 防止 exp 溢出，朴素实现需要两趟归约（先求 max、再求 exp 之和）加一趟计算，多次读全局内存。
+- Online Softmax（NVIDIA 的 Online Normalizer Calculation）在一趟遍历中同时维护当前最大值 m 和当前和 d：每读入一个 x，先算 `m_new = fmaxf(m, x)`，再用校正因子调整旧的和——`d = d * expf(m - m_new) + expf(x - m_new)`，然后 `m = m_new`。
+- 最终 `softmax(x_i) = exp(x_i - m) / d`。
+- 好处：减少一次全局内存读取；而且这种"分块结果可在线合并"的性质正是 FlashAttention 的数学基础之一。
+
+（对应正文 6.3 节）
+
+</details>
+
+**12. 能解释 FlashAttention 的核心思想（Tiling + Online Softmax + 不存中间矩阵）**
+
+<details>
+<summary>参考答案</summary>
+
+- 标准 Attention 需要存储完整的 QK^T 矩阵（seq_len x seq_len）：seq_len=8192、batch=32 时约 128 GB，远超单卡 80GB 显存，且反复在 HBM 和 SRAM 之间搬运这个矩阵严重拖慢速度。
+- FlashAttention 的三个关键技术：**Tiling**——把 Q、K、V 分成能装进 Shared Memory 的小块，每块 Q 与所有 K/V 块做 Attention；**Online Softmax**——在分块计算中正确维护 softmax 的全局 max 和 sum；**重计算**——反向传播时不存中间 Attention 矩阵而是重新计算（用计算换显存）。
+- 中间矩阵只在 SRAM 中，不写回 HBM：HBM 访问量从 O(N^2 \* d) 降为 O(N^2 \* d^2 / SRAM_SIZE)，额外显存从 O(N^2) 降为 O(N)；d=128、SRAM=192KB 的典型配置下 HBM 访问量减少约 8 倍。
+
+（对应正文 7.1、7.2 节）
+
+</details>
+
+**13. 能使用 Triton 编写一个简单的 kernel（如向量加法或 Softmax），并与 PyTorch 结果对比**
+
+<details>
+<summary>参考答案</summary>
+
+- Triton 用 Python 语法写 GPU kernel：函数加 `@triton.jit` 装饰，`pid = tl.program_id(0)` 获取程序块编号，`offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)` 计算处理范围，`mask = offsets < n_elements` 做边界，`tl.load` / `tl.store` 带 mask 读写。
+- 编译器自动处理内存合并、共享内存 Tiling、Warp 调度等底层细节；启动写作 `add_kernel[grid](x, y, output, n, BLOCK_SIZE=1024)`，grid 用 `triton.cdiv` 计算。
+- Softmax 版本按行处理：一次加载一行（越界填 `-inf`），`tl.max` 求行最大值、`tl.exp` 后 `tl.sum` 归一化，实现数值稳定的 softmax。
+- 性能可达手写 CUDA 的 80-95%，FlashAttention 的原始实现就使用了 Triton；验证时对同一 `torch.randn(..., device='cuda')` 输入分别跑 Triton 版与 PyTorch 原生算子并比对结果。
+
+（对应正文 8.1 节）
+
+</details>
+
+**14. 能用 Nsight Compute 分析自己写的 kernel，判断是 memory bound 还是 compute bound**
+
+<details>
+<summary>参考答案</summary>
+
+- 采集：`ncu --set full -o profile ./your_app`，或用 `--metrics` 关注特定指标。
+- 首先看两个指标：**Compute (SM) Throughput**（计算单元利用率）和 **Memory Throughput**（HBM 带宽利用率）——compute bound 时前者应 >70%，memory bound 时后者应 >70%，据此判断 Kernel 卡在哪个屋顶下，再决定调内存访问模式还是计算密度。
+- 其他核心指标：Achieved Occupancy（>25%，非越高越好）、Warp Execution Efficiency（>85%，反映分支发散）、L2 Hit Rate（>70%）、Shared Memory Bank Conflicts（应为 0）。
+- 更细的 Warp Stall / Issue Efficiency / Pipe Utilization 能判断 Warp 是否都在等数据、Tensor Core 是否被喂到；系统级时序（传输与计算是否重叠、launch overhead）则用 Nsight Systems（`nsys profile`）。
+
+（对应正文 9.1、9.2 节）
+
+</details>
 
 ## 📚 参考资料
 

@@ -634,14 +634,94 @@ prof.export_chrome_trace("trace.json")   # 可在 chrome://tracing 中可视化
 
 完成本文学习后，你应该能够：
 
-- 能用 `torch.randn`、`torch.zeros` 等方法创建任意形状的 Tensor，并熟练使用 `view`、`permute`、`squeeze` 等操作变换形状
-- 能解释 `requires_grad=True` 的作用，手动构建计算图并调用 `backward()` 获取梯度
-- 能解释为什么每个训练 step 都需要调用 `optimizer.zero_grad()`，以及梯度累积的原理
-- 能继承 `nn.Module` 实现自定义模型，并使用 `parameters()` 和 `state_dict()` 管理参数
-- 能写出完整的训练循环：DataLoader → forward → loss → backward → optimizer.step → checkpoint
-- 能使用 `torch.autocast` 实现 bf16/fp16 混合精度训练，并解释 `GradScaler` 的作用
-- 能使用 `torch.profiler` 分析训练 step，读懂输出并识别数据加载和 CPU-GPU 传输瓶颈
-- 能解释 fp32、fp16、bf16 三种精度的区别及选择依据
+**1. 能用 `torch.randn`、`torch.zeros` 等方法创建任意形状的 Tensor，并熟练使用 `view`、`permute`、`squeeze` 等操作变换形状**
+
+<details>
+<summary>参考答案</summary>
+
+- 创建：`torch.tensor`（从列表）、`torch.zeros`/`torch.ones`/`torch.randn`（指定形状）、`torch.arange`（序列）、`torch.zeros_like`（复制形状）、`torch.from_numpy`（与 NumPy 共享内存）。
+- `view` 变换形状但要求内存连续；`reshape` 在内存不连续时也能用；`-1` 表示自动推断该维大小。
+- `permute` 交换维度顺序，Transformer 中常用于 `(batch, seq_len, heads, dim)` → `(batch, heads, seq_len, dim)`。
+- `squeeze` 去掉大小为 1 的维度，`unsqueeze` 在指定位置插入大小为 1 的维度。（详见第 1.1、1.2 节）
+
+</details>
+
+**2. 能解释 `requires_grad=True` 的作用，手动构建计算图并调用 `backward()` 获取梯度**
+
+<details>
+<summary>参考答案</summary>
+
+- `requires_grad=True` 让 autograd 追踪该 Tensor 上的所有操作；PyTorch 在前向传播时动态构建计算图（DAG，Define-by-Run，支持 if/else、for 等 Python 控制流），反向传播时沿图计算梯度。
+- 调用 `z.backward()` 后梯度存入叶节点的 `.grad`，例如 `z = (x * 3).sum()` 反向后 `x.grad` 为 3。
+- 三个要点：`backward()` 只能对标量调用；只有叶节点保存梯度；计算图用完即释放。（详见第 2.1、2.2 节）
+
+</details>
+
+**3. 能解释为什么每个训练 step 都需要调用 `optimizer.zero_grad()`，以及梯度累积的原理**
+
+<details>
+<summary>参考答案</summary>
+
+- PyTorch 默认累加梯度而不自动清零：连续两次 `backward()` 会把梯度叠加（如 2+3=5），所以每个 step 开始前必须 `optimizer.zero_grad()`，否则上一轮梯度会混进来。
+- 这个设计是有意为之：梯度累积是显存不足时模拟大 batch 的常用技巧——用多个 micro-batch 各自 backward 累积梯度，再统一 step 一次。（详见第 2.3 节）
+
+</details>
+
+**4. 能继承 `nn.Module` 实现自定义模型，并使用 `parameters()` 和 `state_dict()` 管理参数**
+
+<details>
+<summary>参考答案</summary>
+
+- 继承 `nn.Module` 后，在 `__init__` 中调用 `super().__init__()` 并定义子层，在 `forward` 中定义前向逻辑；调用时用 `model(x)` 而不要直接调用 `forward`。
+- `parameters()`/`named_parameters()` 遍历所有参数；`sum(p.numel() for p in model.parameters())` 统计参数量（AI Infra 中非常常用）。
+- `state_dict()` 返回参数字典，用于模型的保存与加载。（详见第 3.1、3.2 节）
+
+</details>
+
+**5. 能写出完整的训练循环：DataLoader → forward → loss → backward → optimizer.step → checkpoint**
+
+<details>
+<summary>参考答案</summary>
+
+- Dataset 定义“数据集里有什么、怎么取一条”（`__len__`、`__getitem__`）；DataLoader 负责 batching、shuffle 和多进程加载（`num_workers` 过小会让 GPU 等数据，`pin_memory=True` 走异步 DMA）。
+- 每个 step 核心五步：forward → loss → backward → `optimizer.step()` → `zero_grad()`；每个 epoch 结束调用 `scheduler.step()` 调整学习率；验证时切 `model.eval()` 并用 `torch.no_grad()`。
+- checkpoint 要同时保存 epoch、`model.state_dict()` 和 `optimizer.state_dict()`，断点恢复时全部加载。（详见第 4 节）
+
+</details>
+
+**6. 能使用 `torch.autocast` 实现 bf16/fp16 混合精度训练，并解释 `GradScaler` 的作用**
+
+<details>
+<summary>参考答案</summary>
+
+- 核心思路：前向和反向用低精度（fp16/bf16）加速计算，参数更新用 fp32 保证精度；写法是用 `with torch.autocast(device_type='cuda', dtype=...)` 包住前向和 loss 计算。
+- BF16（Ampere+ GPU 推荐）数值范围与 fp32 相同，不需要 GradScaler，直接 `loss.backward()` 即可。
+- FP16 范围小、梯度易下溢为 0，需要 `GradScaler`：`scaler.scale(loss).backward()` 先把 loss 放大以防梯度下溢，`scaler.step(optimizer)` 在更新前还原，`scaler.update()` 动态调整缩放因子。（详见第 5.2 节）
+
+</details>
+
+**7. 能使用 `torch.profiler` 分析训练 step，读懂输出并识别数据加载和 CPU-GPU 传输瓶颈**
+
+<details>
+<summary>参考答案</summary>
+
+- 用法：`with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], ...)` 包住目标代码，用 `record_function` 标注阶段（forward/backward 等），最后 `prof.key_averages().table(sort_by="cuda_time_total")` 查看，或 `export_chrome_trace` 可视化；分析前要先 warmup。
+- 常见问题模式：CPU total 远大于 CUDA total 说明 GPU 在等 CPU（数据预处理、Python 开销）；大量小 CUDA kernel 意味着 launch overhead 累积，考虑 `torch.compile` 或算子融合；`.item()`、`print(tensor)` 会触发隐式 CPU-GPU 同步，阻塞流水线。
+- 对策：增加 `num_workers`/`prefetch_factor` 解决数据加载瓶颈；避免循环中反复 `.cuda()`；每 N 步才 `loss.item()` 记录一次。（详见第 6.1–6.3 节）
+
+</details>
+
+**8. 能解释 fp32、fp16、bf16 三种精度的区别及选择依据**
+
+<details>
+<summary>参考答案</summary>
+
+- fp32：每元素 4 字节，数值范围大，是默认精度，也用于优化器状态。
+- fp16：2 字节，数值范围小、易溢出，用于混合精度训练时需要 Loss Scaling。
+- bf16：2 字节，数值范围与 fp32 相同，溢出概率大大降低，是 Ampere+ GPU 上混合精度训练的推荐选择。
+- 选择依据：低精度显存减半、计算更快，但要权衡数值稳定性——有 Ampere+ 硬件优先 bf16，只有 fp16 硬件时配合 GradScaler 使用。（详见第 1.4 节）
+
+</details>
 
 ## 📚 参考资料
 
